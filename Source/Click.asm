@@ -1,0 +1,2065 @@
+TITLE Click
+ _______________________________________________________________________________________
+ _______________________________________________________________________________________
+
+;;
+ 
+    Functions related to this.        
+ 
+ 
+;;
+
+
+
+;;
+ Search feature by right-clicking on text: We search for main Labels, macros or
+ equates declarations, data declarations. This is to say that, if we are inside
+ square brackets, any fitting first word, or odd word, or ':' ended word is good;
+ if outside, only ':' ended words.
+;;
+
+[InsideText: ?  RCstart: ?  RCend: ?  DataDeclaration: ?    MacroDeclaration: ?]
+
+[OldEditData: ? #21] [PreviousSearch: ? #32]
+[OneWordChars: B$ '0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.' 0
+ OneWordCharsLen: D$ len   Edge: B$ 0   OddWord: 0   BackAnyWhere: &TRUE]
+
+; WordEdge looks if a char is or not inside OneWordChars and tells if word edge or not.
+; we preserve the flags because direction flag may be set on or off by caller:
+
+WordEdge:
+    pushfd | cld
+        push ecx, esi, edi
+            mov ecx D$OneWordCharsLen, edi OneWordChars, B$Edge &TRUE
+            repne scasb | jne L9>
+                mov B$Edge &FALSE
+L9:     pop edi, esi, ecx
+    popfd
+ret
+
+
+[ShowEquateTitle: 'Win Equate Value', 0]
+
+[ShowEquateHexa: ? #40]
+
+ShowEquate:
+     mov ebx, eax
+
+     mov edi ShowEquateHexa, esi TrashString
+     While B$esi <> 0
+        movsb
+     End_While
+     mov eax '   =' | stosd | mov eax '    ' ecx 3 | rep stosd
+
+     push edi, ebx
+         std
+            mov ecx 9
+;L1:
+            Do
+                If ecx = 5
+                    mov al '_' | stosb
+                End_If
+                If ecx = 1
+                    mov al '_' | stosb
+                End_If
+                mov al bl | and al 0F | add al '0' |  On al > '9', add al 7
+                stosb | shr ebx 4; | loop L1<
+                dec ecx
+            Loop_Until ecx = 0
+         cld
+     pop ebx, edi
+     inc edi
+
+     mov D$edi '_h  ', D$edi+4 '  [' | add edi 7
+
+     mov eax ebx | call WriteEaxDecimal
+
+     mov D$edi ']   ', B$edi+4 0
+
+     call 'USER32.MessageBoxA' D$hwnd, ShowEquateHexa, ShowEquateTitle, &MB_SYSTEMMODAL
+ret
+
+;;
+ I suppress OdWord testing for Equates pointing because it is much difficult work for
+ NOP: Usually Equates are defined BEFORE they are used. A wrong pointing could only
+ append if user define some Equate AFTER reusing it in Equates definitions (???!!!).
+ Good for him!
+;;
+
+[PossibleWinApi: B$ ?   PossibleOpCode: ?   LocalSymbol: ?] [NumberDashLines: ?]
+
+RightClick: ; 'InternSearch'
+    mov B$ShiftBlockInside &FALSE
+
+    push D$BlockInside
+        call LeftButtonSimulation | call LeftButtonUp
+        mov eax D$CurrentWritingPos
+    pop D$BlockInside
+
+    ..If B$BlockInside = &TRUE
+       .If eax >= D$BlockStartTextPtr
+            If eax <= D$BlockEndTextPtr
+               jmp RightClickOnBlock
+            End_If
+       .End_If
+    ..End_If
+
+    call LeftButtonSimulation | call LeftButtonUp | call AskForRedraw
+
+  ; Save all 'EditData's
+    mov esi EditData, edi OldEditData, ecx 21 | rep movsd
+
+    mov esi D$CurrentWritingPos
+
+  ; Special Selections cases when Clicking exactely on '"' or '[':
+    If B$esi = '"'
+        call SelectDoubleQuotedText | ret
+    Else_If B$esi = '['
+        call SelectDataBlock | ret
+    End_If
+
+  ; Is it a Right-Click on 'blank' area for simply routing back?
+  ; Or on a DashLine >>> do nothing.
+    mov al B$esi
+    If B$esi = '_'
+        On B$esi+1 = '_', ret
+        On B$esi-1 = '_', ret
+    End_If
+
+    call WordEdge
+
+    .If B$Edge <> &FALSE
+        If B$esi <= ' '
+            jmp BlankRightClick
+        Else_If B$esi = '&'
+          ; '&' not considered in the WordEdge Routine, but valid here for Win32 Equates
+        Else
+          ; Abort on alien Char that could be found, for example, in Strings:
+            ret
+        End_If
+    .End_If
+
+    mov B$PossibleWinApi &FALSE
+
+; Reused by 'SearchFromTreeListBox' and the Debugger 'DataView_ShowDeclaration':
+InternalRightClick: ; 'InternSearch'
+    mov B$InsideMLC &FALSE, B$InsideComment &FALSE
+
+  ; Go to start of Clicked word:
+    std
+L0:     lodsb | call WordEdge | cmp B$Edge &TRUE | jne L0<
+    cld
+    inc esi
+
+  ; Special case for Numbers:
+    ..If B$esi+1 >= '0'
+        .If B$esi+1 <= '9'
+            call RightClickedNumber | ret
+        .End_If
+    ..End_If
+
+  ; Special case of Tag Comment:
+    mov eax D$esi+1 | or eax 020202020
+    If eax = 'tag '
+        call IsItTag | On eax = &TRUE, jmp TagParser
+    End_If
+
+  ; To differenciate for example a Click on 'mov' (if 'mov' is a Macro) from '[mov | ...':
+    push esi
+        While B$esi = ' ' | dec esi | End_While
+        mov B$PossibleOpCode &FALSE
+        On B$esi = '[', mov B$PossibleOpCode &TRUE
+    pop esi
+
+    inc esi
+
+  ; Special case for OS Equates, plus, take care of Strings Delimiters for Api calls:
+    If B$esi-1 = '&'
+        push esi
+            call NewGetEquates | mov edx esi
+        pop esi
+        On B$EquateFound = &TRUE, call ShowEquate
+        ret
+    Else_If B$esi-1 = "'"
+        mov B$PossibleWinApi &TRUE
+    Else_If B$esi-1 = "'"
+        mov B$PossibleWinApi &TRUE
+    End_If
+
+  ; First Char, Low Case into ah:
+    mov ah B$esi | or ah 32
+
+  ; edx > second char (> edi)
+    inc esi | mov ebx 0, edx esi
+
+  ; Search for end of Clicked word:
+L0: lodsb | inc ebx | call WordEdge | cmp B$Edge &TRUE | jne L0<
+    sub ebx 1 | jc L9>>             ; ebx = length-1
+        cmp ebx 0 | je L9>>
+    cmp ebx 1 | ja L0>              ; Abort if local label
+    cmp B$esi-2 '9' | ja L0>
+        ret
+
+  ; Now, edi (edx) > start+1 of right clicked word; ebx = lenght-1. Search maching Symbol:
+L0: mov esi D$CodeSource, ecx D$SourceLen, B$InsideBracket &FALSE, B$InsideComment &FALSE
+;;
+  Clean up, in actual Style to be continued from here, when i will have time.
+  Old Routines yet here at 'OldRightClick', 'OldInternalRightClick'.
+;;
+    jmp L0>
+
+T0: lodsb | jmp L1>                         ; simplified loop for strip texts and comments
+T1: loop T0<
+    On B$InsideMLC = &TRUE, jmp C0>         ; Because unpaired MLC are allowed
+      ret
+
+L0: lodsb | cmp al ah | je L3>>             ; test XORed AH each pass in order to handle
+            xor ah 32 | cmp al ah | je L3>> ; case without modifying AL (following tests)
+        jmp L1>
+L2: loop L0<
+
+C0:     .If B$PossibleWinApi = &TRUE
+            call WinApiFirstPass ; SearchWinApi
+        .Else
+            mov B$MnemonicHelpFound &FALSE
+            call SearchMneMonic             ; Nothing found > it it a Mnemonic?
+            If B$MnemonicHelpFound = &FALSE
+                On ebx < 3, call SearchForReg
+            End_If
+        .End_If
+        ret
+
+L1: cmp B$InsideMLC &TRUE | jne L1>
+      cmp D$esi-2 MLC | jne T1<
+        mov B$InsideMLC &FALSE | jmp L2<
+L1: cmp B$InsideComment &TRUE | jne L1>
+      cmp al LF  | jne T1<<
+        mov B$InsideComment &FALSE | jmp L2<
+L1: cmp B$InsideText &FALSE | je L1>
+      cmp al B$InsideText | jne T1<<
+        mov B$InsideText &FALSE | jmp L2<<
+L1: cmp al "'" | jne L1>
+      mov B$InsideText al | jmp T1<<
+L1: cmp al '"' | jne L1>
+      mov B$InsideText al | jmp T1<<
+L1: cmp al '[' | jne L1>
+        call ScaningBracket
+
+S0:   cmp B$esi ' ' | jne L2<<
+        inc esi | sub ecx 1 | jnc S0<        ; strip double spaces
+          ret
+
+L1: cmp al ']' | jne L1>
+      mov B$InsideBracket &FALSE, B$DataDeclaration &FALSE, B$MacroDeclaration &FALSE
+      jmp L2<<
+
+L1: cmp al ';' | jne L1>                     ; jmp over comments
+        If D$esi-2 = MLC   ; (LF ; ; CR)
+            mov B$InsideMLC &TRUE | jmp T1<<
+        Else
+            mov B$InsideComment &TRUE | jmp T1<<
+        End_If
+
+L1: cmp al '|' | jne L1>
+      mov B$InsideBracket &FALSE | jmp L2<<
+L1: cmp al ':' | jne L2<<
+      mov B$DataDeclaration &TRUE
+
+            jmp L2<<                         ; (avoids pointing equates datas).
+
+L3: mov al B$esi-2 | call WordEdge | cmp B$Edge &FALSE | je L2<<     ; left edge?
+
+        mov D$NumberDashLines 0
+
+        pushad | mov ecx ebx, edi edx
+
+C0:       lodsb | mov ah B$edi | inc edi
+
+          ; case insensitive comparison:
+            If al >= 'A'
+                On al <= 'Z', or al 020
+            End_If
+
+            If ah >= 'A'
+                On ah <= 'Z', or ah 020
+            End_If
+
+          ; Edi is pointing to the clicked Word. Esi ---> Parsed Source:
+
+            .If B$edi-1 <> '_'
+                While B$esi-1 = '_'
+                    lodsb
+                    If al >= 'A'
+                        On al <= 'Z', or al 020
+                    End_If
+                    inc D$NumberDashLines | dec ecx | jz X1>
+                End_While
+            .End_If
+
+            .If B$esi-1 <> '_'
+                While B$edi-1 = '_'
+                    mov ah B$edi | inc edi
+                    If ah >= 'A'
+                        On ah <= 'Z', or ah 020
+                    End_If
+                    dec D$NumberDashLines | dec ecx | jz X1>
+                End_While
+            .End_If
+
+            cmp ah al | jne C1>
+            loop C0<
+
+X1:         mov al B$esi | call WordEdge
+            If B$Edge = &FALSE
+                popad | jmp L2<<
+            End_If
+
+            popad | jmp C2>
+
+C1:     popad | jne L2<<
+
+   ; mov al B$esi+ebx | call WordEdge | cmp B$Edge &FALSE | je L2<<    ; right edge?
+
+C2: If B$MacroDeclaration = &TRUE
+      ; Was it first word?
+        cmp esi D$MacroNamePointer | jne L2<<
+    End_If
+
+    push ebx
+        add ebx D$NumberDashLines
+        cmp B$esi+ebx ':'
+    pop ebx
+    je L4>                                 ; Label?
+
+; as we have tested for '|' (> InsideBracket = FALSE), "test B$OddWord 1" applies either
+; uppon first word of macro def. or odd word of equate def. But data body could still
+; be pointed as odd equate dec. So we finally test 'B$DataDeclaration'.
+
+      cmp B$InsideBracket &TRUE | jne L2<<                     ; equ. / macro
+          cmp B$DataDeclaration &TRUE | je L2<<  ; avoid pointing data body instead of Equate
+              If B$MacroDeclaration = &FALSE
+                call PairedEquate | On B$ValidEquateOrMacro = &FALSE, jmp L2<<
+              End_If
+
+L4: dec esi                                                    ; found
+    mov D$BlockStartTextPtr esi, D$RCstart esi                 ; RCstart/End used by
+    add esi ebx | mov D$BlockEndTextPtr esi, D$RCend esi       ; 'BackClick'
+    mov B$BlockInside &TRUE
+    inc esi | mov D$CurrentWritingPos esi
+
+    std | mov ecx 0
+L5:     lodsb | inc ecx
+        cmp al LF | jne L5<                    ; search for start of line
+        cld | ;dec ecx
+
+    call StorePosInBackTable
+
+    add esi 2 | mov D$UpperLine esi                            ; and set all needed
+    call UpOneLine | call UpOneLine | call UpOneLine           ; variables for Pos, in
+
+  ; Would be a good thing... but doesn't work. The Block seems cleared by 'TryToMove'
+  ; when it can't move any more upward... complicated... later...
+
+  ;  call UpOneLine | call UpOneLine | call UpOneLine
+  ;  call UpOneLine | call UpOneLine | call UpOneLine
+
+    mov D$CaretLine 3, D$CaretRow ecx, D$PhysicalCaretRow ecx  ; case user wish editing
+    call TryToMove
+    mov D$RightScroll 0 | call AskForRedraw
+
+    If B$PossibleOpCode = &TRUE
+        mov esi D$BlockStartTextPtr, ah B$esi, edx esi, ebx D$BlockEndTextPtr
+        or ah 32 | inc edx | sub ebx esi
+        call SearchMneMonic
+    End_If
+
+L9: ret
+
+
+SearchForReg:
+    pushad
+        dec edx | mov esi edx, edi MnemonicCopy, ecx ebx | inc ecx
+L0:     lodsb | On al > 'Z', and eax (not 020) | stosb | loop L0<
+        mov B$edi 0
+        mov esi MnemonicCopy
+        Call IsItaReg
+        On eax <> 0, call Help D$hwnd, B_U_AsmName, {'Registers', 0}, ContextHlpMessage
+    popad
+ret
+____________________________________________________________________________________________
+
+[ValidEquateOrMacro: ?]
+;;
+[LowSigns            31
+    TextSign            30
+;;
+
+;;
+  'PairedEquate' job is to make sure, for the Right-Click feature, that, the pointed
+  word is really an Equate Declaration, and not an Evocation.
+;;
+
+PairedEquate:
+  ; esi points to the Second Char of the pointed word.
+    pushad
+    push D$CodeSourceA, D$CodeSourceB
+        While B$esi >= '0' | inc esi | End_While
+        mov ecx 2
+
+L0:     While B$esi <> '[' | dec esi | inc ecx | End_While
+
+      ; Case of '[' in Text or Comments:
+        If esi > D$MacroNamePointer
+            dec esi | inc ecx | jmp L0<
+        End_If
+
+        mov edi Trash1, D$StripLen ecx | rep movsb | mov D$edi CRLF2
+
+        move D$CodeSourceA Trash1, D$CodeSourceB Trash2
+
+      ; CoolParsers
+        call KillMultiLineComments
+        call NewKillVirtualCRLF
+        call KillMeaninglessCommas
+
+      ; HotParsers
+        call StripUnderscore
+        call TranslateAsciiToMyAscii
+    call RemoveDuplicatedSpaces ; fixed by guga 21/07/2018
+    call RemoveDuplicatedEOI ; fixed by guga 21/07/2018
+        call StripUnneededSpaces
+        call ConvertCommasToSpace
+
+        mov esi D$CodeSourceA, edx D$StripLen | add edx esi
+
+        While esi < edx
+            If B$esi < Separators
+                mov B$esi Space
+            End_If
+            inc esi
+        End_While
+
+    call RemoveDuplicatedSpaces ; fixed by guga 21/07/2018
+        call StripUnneededSpaces
+
+        mov esi D$CodeSourceA, edx D$StripLen | add edx esi | dec edx
+        mov D$ValidEquateOrMacro &FALSE
+
+      ; Don't know why, but it seems that when stripping un-needed Spaces,
+      ; the last one might be lost. Probably when followed by EOI:
+        On B$edx <> Space, mov B$edx Space
+
+        While esi < edx
+            inc esi | On B$esi = Space, xor D$ValidEquateOrMacro &TRUE
+            On B$esi = Space, inc eax
+        End_While
+    pop D$CodeSourceB, D$CodeSourceA
+    popad
+ret
+
+
+
+BlankRightClick:    On B$BackAnyWhere = &TRUE, call BackClick | ret
+
+
+[MacroNamePointer: ?]
+
+ScaningBracket:
+    mov B$InsideBracket &TRUE, B$DataDeclaration &FALSE, B$MacroDeclaration &FALSE
+
+  ; Verify that this is not an Alternate Syntax Instruction:
+    push eax
+        mov al B$esi-2 | or al 020
+        If al = 'd'
+L0:         pop eax
+            While B$esi > LF | inc esi | End_While
+            ret
+        Else_If al = 'r'
+            jmp L0<
+        End_If
+    pop eax
+
+    push esi
+
+      ; Go to first word and keep pointer as required for final test (+1):
+        While B$esi = ' ' | inc esi | End_While
+        mov D$MacroNamePointer esi | inc D$MacroNamePointer
+
+      ; Skip first word:
+        While B$esi > ' '
+            inc esi
+            If B$esi = '|'
+                mov B$MacroDeclaration &TRUE | jmp L9>
+            End_If
+        End_While
+
+      ; What last Char in first word:
+        If B$esi-1 = ':'
+            mov B$DataDeclaration &TRUE | jmp L9>
+        Else_If B$esi-1 = '|'
+            mov B$MacroDeclaration &TRUE | jmp L9>
+        End_If
+
+      ; What is next non space Char:
+        While B$esi = ' ' | inc esi | End_While | lodsb
+
+        If al = '|'
+            mov B$MacroDeclaration &TRUE
+        Else_If al = CR
+            mov B$MacroDeclaration &TRUE
+        Else_If al = ';'
+            mov B$MacroDeclaration &TRUE
+        End_If
+L9: pop esi
+ret
+
+____________________________________________________________________________________________
+
+SelectDoubleQuotedText:
+    mov D$BlockStartTextPtr esi | inc D$BlockStartTextPtr
+
+    mov B$TextGoingOn &FALSE | lodsb | call IsItFirstText
+
+L1: lodsb | On esi >= D$SourceEnd, ret
+            call IsItFirstText | je L1<
+
+    sub esi 2
+    mov D$BlockEndTextPtr esi, B$BlockInside &TRUE
+    call AskForRedraw
+ret
+
+
+SelectDataBlock:
+    inc esi | mov D$BlockStartTextPtr esi, B$TextGoingOn &FALSE
+    .While B$esi <> ']'
+
+        .If B$esi = ';'
+            If D$esi-2 = MLC   ; (LF ; ; CR)
+                Do
+                    inc esi | On esi >= D$SourceEnd, ret
+                Loop_Until D$esi-2 = MLC
+            Else
+                While B$esi <> LF
+                    inc esi
+                End_While
+            End_If
+        .End_If
+
+L1:     lodsb | On esi >= D$SourceEnd, ret
+                call IsItFirsttext | je L1<
+    .End_While
+
+L9: dec esi
+    mov D$BlockEndTextPtr esi, B$BlockInside &TRUE
+    call AskForRedraw
+ret
+
+____________________________________________________________________________
+
+; User selected a Block of text and then RightClick uppon it:
+
+[FloatHandle: 0
+ Float_Copy_String: B$ 'Copy', 0
+ Float_Delete_String: 'Delete', 0
+ Float_Replace_String: 'Replace', 0
+
+ Float_SearchFromTop_String: 'Search from Top', 0
+ Float_SearchUp_String: 'Search Up', 0
+ Float_SearchDown_String: 'Search Down', 0
+
+ Float_Unfold_String: 'Unfold', 0         Float_BookMark_String: 'BookMark', 0
+ Float_UnBookMark_String: 'UnBookMark', 0 Float_Number_String: 'Number forms', 0
+ Float_SelReplace_String: 'Replace in Selection', 0
+ Float_BadDisLabel_String: 'Bad Disassembly', 0
+ Float_Turn_Code_String: 'This should have been Code', 0]
+
+
+[Float_Copy 5500    Float_SearchFromTop 5501    Float_SearchUp 5502    Float_SearchDown 5503
+ Float_Unfold 5504  Float_BookMark 5505         Float_UnBookMark 5506  Float_Number 5507
+ Float_ReArange 5508 Float_SelReplace 5509         Float_Delete 5510      Float_Replace 5511
+ Float_BadDisLabel 5512]
+
+RightClickOnBlock:
+    call 'USER32.CreatePopupMenu' | mov D$FloatHandle eax
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING, Float_Copy, Float_Copy_String
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING, Float_Delete, Float_Delete_String
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING, Float_Replace, Float_Replace_String
+
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_SEPARATOR &NULL &NUll
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING Float_SearchFromTop,
+                             Float_SearchFromTop_String
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING Float_SearchUp Float_SearchUp_String
+    call 'USER32.AppendMenuA' D$FloatHandle &MF_STRING Float_SearchDown Float_SearchDown_String
+
+    call IsItaNumber
+    If eax > 0
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_Number, Float_Number_String
+    End_If
+
+    call IsItanEqual | On eax = &TRUE, jmp L0>
+
+    call IsItaMacro
+    If eax > 0
+L0:     call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_Unfold, Float_Unfold_String
+    End_If
+
+    call IsItaLabel
+    If eax = 1
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_BookMark,
+                                  Float_BookMark_String
+    Else_If eax = 2
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+        call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_UnBookMark,
+                                  Float_UnBookMark_String
+    End_If
+
+    .If D$IsDebugging = &FALSE
+        mov ecx D$BlockEndTextPtr | sub ecx D$BlockStartTextPtr
+        If ecx > 50
+            call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+            call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_SelReplace,
+                                    Float_SelReplace_String
+        End_If
+    .End_If
+
+
+    .If B$ThisSourceIsDisassembled = &TRUE
+        call IsItDisassembledLabel
+        If eax = &TRUE
+            call 'USER32.AppendMenuA' D$FloatHandle, &MF_SEPARATOR, &NULL, &NUll
+            call 'USER32.AppendMenuA' D$FloatHandle, &MF_STRING, Float_BadDisLabel,
+                                      Float_BadDisLabel_String
+        end_If
+    .End_If
+
+
+    call 'USER32.GetWindowRect' D$hwnd RECT
+    mov eax D$RECTleft | add eax 20 | add D$MousePosX eax
+    mov eax D$RECTtop | add D$MousePosY eax
+
+    call 'KERNEL32.GetCurrentThreadId'
+    call 'USER32.SetWindowsHookExA' &WH_KEYBOARD, FloatMenuProc, &NULL, eax
+    mov D$hHook eax
+
+    mov eax D$MousePosX | add eax D$BpMarginWidth
+
+    call 'USER32.TrackPopupMenu' D$FloatHandle,
+                                 0, eax, D$MousePosY, 0,
+                                 D$EditWindowHandle, &NULL
+
+    call 'USER32.UnhookWindowsHookEx' D$hHook
+ret
+
+
+IsItDisassembledLabel:
+    mov esi D$BlockEndTextPtr | On B$esi+1 <> ':', jmp L7>
+
+    mov esi D$BlockStartTextPtr
+    If D$esi = 'Code'
+        mov D$DisLabelTypeWas CODEFLAG
+        call GetDisLabelHexaValue
+        xor B$GetHexaFromTextError &TRUE | mov eax D$GetHexaFromTextError
+
+    Else_If D$esi = 'Data'
+        mov D$DisLabelTypeWas DATAFLAG
+        call GetDisLabelHexaValue
+        xor B$GetHexaFromTextError &TRUE | mov eax D$GetHexaFromTextError
+
+    Else
+L7:     mov eax 0
+
+    End_If
+ret
+
+
+GetDisLabelHexaValue:
+;;
+  The "On B$esi = '_', jmp L1>" are for cases of Label that are appended with a "_Symbol"
+  taken from the 'StringsMap'.
+;;
+    mov esi D$BlockStartTextPtr, edi CopyOfLabelHexa | add esi 4
+    While B$esi <> ':'
+        movsb | On B$esi = '_', jmp L1>
+    End_While
+L1: mov B$edi 0
+
+    call GetHexaFromText CopyOfLabelHexa
+
+    If B$GetHexaFromTextError = &TRUE
+        mov D$DisAddressWas 0
+    Else
+        mov D$DisAddressWas eax
+    End_If
+
+    mov D$CopyOfNextLabelHexa 0
+    mov eax D$CopyOfLabelHexa
+    .While esi < D$SourceEnd
+        inc esi
+        .If D$esi = eax
+            mov ebx esi
+            While B$esi <> ':'
+                inc esi | On B$esi <= ' ', jmp L2>
+            End_While
+
+            mov esi ebx, edi CopyOfNextLabelHexa
+            While B$esi <> ':'
+                movsb | On B$esi = '_', jmp L1>
+            End_While
+L1:         mov B$edi 0
+            push D$GetHexaFromTextError
+                call GetHexaFromText CopyOfNextLabelHexa
+                If B$GetHexaFromTextError = &TRUE
+                    mov D$NextDisAddressWas 0, D$CopyOfNextLabelHexa 0
+                Else
+                    mov D$NextDisAddressWas eax
+                End_If
+            pop D$GetHexaFromTextError
+        .End_If
+L2: .End_While
+ret
+
+
+Proc FloatMenuProc:
+    Arguments @nCode, @wParam, @lParam
+
+        ..If D@nCode = &HC_ACTION ; HC_NOREMOVE
+            On D@wParam = &VK_ESCAPE
+L1:             mov B$BlockInside &FALSE
+            End_If
+        ..End_If
+
+L9:     mov eax &FALSE ; Forwarding
+EndP
+
+
+CopyFromFloatMenu:
+    call 'USER32.DestroyMenu' D$FloatHandle
+    call ControlC
+ret
+
+
+SetFloatSearch:
+    mov esi D$BlockStartTextPtr, edi SearchString, ecx D$BlockEndTextPtr
+    sub ecx esi | inc ecx
+    mov D$LenOfSearchedString ecx
+    rep movsb
+ret
+
+SearchUpFromFloatMenu:
+    mov B$DownSearch &FALSE
+    call SetFloatSearch | call SetCaret D$BlockStartTextPtr | call StringSearch
+ret
+
+SearchFromTopFromFloatMenu:
+    mov B$DownSearch &TRUE
+    call SetFloatSearch
+    call FullUp | mov D$CaretRow 1, D$CaretLine 0 | move D$CurrentWritingPos D$CodeSource
+    call StringSearch
+ret
+
+SearchDownFromFloatMenu:
+    mov B$DownSearch &TRUE
+    call SetFloatSearch | call StringSearch
+ret
+
+
+RightClickedNumber:
+    inc esi
+    push D$BlockStartTextPtr, D$BlockEndTextPtr
+        mov D$BlockStartTextPtr esi
+        push esi
+L0:         lodsb | call WordEdge | cmp B$Edge &TRUE | jne L0<
+            sub esi 2 | mov D$BlockEndTextPtr esi
+        pop esi
+        call IsItaNumber
+    pop D$BlockEndTextPtr, D$BlockStartTextPtr
+    If eax <> &FALSE
+        call ViewClickedNumber
+    End_If
+ret
+
+
+[ClickedNumberValue:
+ ClickedNumberValue.Conv32Bit: D$ 0
+ ClickedNumberValue.Conv64Bit: D$ 0
+ ClickedNumberValue.Conv96Bit: D$ 0]
+
+[HexaInBlock: ?    BinaryInBlock: ?]
+
+[NumberCopy: ? #25]
+
+[BlockPtrNegativeNumber: B$ 0]
+
+IsItaNumber:
+    mov eax 0, esi D$BlockStartTextPtr;, bl B$esi
+    mov B$HexaInBlock &FALSE, B$BinaryInBlock &TRUE
+    mov B$BlockPtrNegativeNumber &FALSE
+
+    mov D$ClickedNumberValue.Conv32Bit 0
+    mov D$ClickedNumberValue.Conv64Bit 0
+    mov D$ClickedNumberValue.Conv96Bit 0
+
+    While esi <= D$BlockEndTextPtr
+        .If B$esi <> ' '
+            If B$esi = '-'
+                inc B$BlockPtrNegativeNumber
+            Else_If B$BlockPtrNegativeNumber > 1 ; invalid number format. Ex.: - - - 123456
+                jmp L9>>
+            Else
+                jmp L1>
+            End_If
+        .End_If
+        inc esi
+    End_While
+
+L1:
+    mov edi esi ; update the ptr
+
+    mov bl B$esi
+    cmp bl '0' | jb L9>>
+        cmp bl '9' | ja L9>>
+
+L0: inc esi
+    cmp B$esi '_' | je L1>
+    cmp B$esi '0' | jb L2>  ; 010_0000_0000
+    cmp B$esi 'F' | ja L2>
+    cmp B$esi 'A' | jae L1>
+    cmp B$esi '9' | ja L2>
+L1: jmp L0<
+
+L2: mov ecx esi | sub ecx edi
+    If ecx > 50
+        mov eax 0 | jmp L9>>
+    End_If
+
+    mov esi edi, edi NumberCopy
+
+    While esi <= D$BlockEndTextPtr
+L3:     lodsb
+        If al >= 'a'
+            On al <= 'f', sub al 32
+        End_If
+
+        If al = '_'
+            jmp L3<
+        Else_If al > 'F'
+            mov eax 0 | jmp L9>>
+        Else_If al < '0'
+            mov eax 0 | jmp L9>>
+        End_If
+
+        On al > '9',  mov B$HexaInBlock &TRUE
+        On al > '1', mov B$BinaryInBlock &FALSE
+
+        On al <> '_', stosb
+    End_While
+
+   .If B$BlockPtrNegativeNumber <> 0 ; we can´t have negative hexadecimal or binary values
+        xor eax eax
+        On B$BinaryInBlock = &TRUE, jmp L9>>
+        On B$HexaInBlock = &TRUE, jmp L9>>
+   .End_If
+
+    ;mov D$OldStackPointer esp
+    Ros_SaveStack
+    mov B$edi 0
+    mov esi NumberCopy
+    ...If W$esi = '00'
+        If B$BinaryInBlock = &TRUE
+            call ClickBinary
+        Else
+            mov eax 0
+        End_If
+    ...Else_If B$esi = '0'
+;;
+        mov eax esi | inc eax
+        call StrLenProc eax
+        ..If_And eax > 8, eax <= 10 ; TenByte; Included the extra '0'
+        ..Else_if_And eax > 4, eax <= 8 ; qword
+            call atoi64 esi
+            mov D$ClickedNumberValue.Conv32Bit eax
+            mov D$ClickedNumberValue.Conv32Bit edx
+            mov eax &TRUE
+            ;todouble
+        ..Else ; dword, word or byte
+        ..End_if
+;;
+        call ClickHexa
+        If eax = 0 ; set eax to true
+            mov D$ClickedNumberValue eax
+            inc eax
+            ret
+        End_If
+    ...Else
+        ..If B$HexaInBlock = &FALSE
+            ;atoi64
+            call ClickDecimal ; replace with atoi64 C:\masm32\qwordtests\gugaatoi64\Debug\Mygugaatoi64_New.EXE
+            .If B$BlockPtrNegativeNumber = &TRUE
+                If edx <> 0
+                    neg edx | neg eax
+                    sbb edx 0
+                Else
+                    neg eax
+                End_If
+            .End_If
+            ;mov D$ClickedNumberValue+4 edx; the qword part
+            ret
+
+        ..Else
+            mov eax 0
+        ..End_If
+    ...End_If
+
+  ; eax = Number if any (or 0):
+L9: mov D$ClickedNumberValue eax
+ret
+____________________________________________________________________________________________
+
+; Numbers translations Routines without error report (no Menu Option on failure, instead)
+
+ClickBinary:
+    lodsw                                               ; clear first '00'
+NackedClickBinary:
+    mov ebx 0, edx 0, ecx 0
+L0: lodsb | cmp al Closebracket | jbe L9>
+    sub al '0' | shld edx ebx 1 | shl ebx 1 | or bl al
+    cmp edx ecx | jb L8>
+        mov ecx edx
+            cmp al 2 | jb L0<
+L8:             mov ecx D$BinTypePtr | jmp BadNumberFormat
+L9: mov eax ebx
+ret
+
+
+ClickHexa:
+    lodsb                                               ; clear first '0'
+NackedClickHexa:
+    mov ebx 0,  edx 0, ecx 0
+L0: lodsb | cmp al LowSigns | jbe L9>
+        sub al '0' | cmp al 9 | jbe L2>
+            sub al 7
+L2: shld edx ebx 4 | shl ebx 4 | or bl al
+    cmp edx ecx | jb L8>
+        mov ecx edx
+            cmp al 0F | jbe L0<
+L8: mov ecx HexType | jmp BadClickFormat
+L9: mov eax ebx
+ret
+
+;;
+guga note
+
+check BadNumberFormat and TranslateDecimal
+
+v[teste: B$ 1234564564654654]
+
+mov eax 5
+push 0
+call 'KERNEL32.ExitProcess'
+;;
+ClickDecimal:
+    call Asciito80 esi, ClickedNumberValue
+    ;call atoi64, esi
+    ret
+;;
+    mov eax 0, ecx 0
+
+L2: mov cl B$esi | inc esi                        ; (eax used for result > no lodsb)
+    cmp cl LowSigns | jbe  L9>
+
+      mov edx 10 | mul edx | jo L3>               ; loaded part * 10
+                                                  ; Overflow >>> Qword
+        sub  ecx '0' | jc L7>
+        cmp  ecx 9   | ja L7>
+
+          add  eax ecx | jnc  L2<
+            jmp  L4>                              ; carry >>> Qword
+
+                                                  ; if greater than 0FFFF_FFFF:
+L3: sub ecx '0' | jc L7>
+    cmp ecx 9   | ja L7>
+
+      add eax ecx
+
+L4:   adc edx 0
+      mov cl B$esi | inc  esi
+      cmp cl LowSigns | jbe L9>
+
+        mov ebx eax, eax edx, edx 10 | mul edx    ; high part * 10
+          jo L6>                                  ; Qword overflow
+            xchg eax ebx | mov edx 10 | mul edx   ; low part * 10
+            add  edx ebx
+            jnc   L3<                             ; carry >>> overflow
+L6:           mov eax 0 | ret
+
+L7: mov ecx D$DezimalTypePtr | jmp BadNumberFormat
+L9: ret                                           ; >>> number in EDX:EAX
+;;
+
+
+;;
+ convert a decimal string to qword value
+ number in edx:eax
+ eax = lowpart
+ edx = hipart
+;;
+Proc atoi64:
+    Arguments @String
+
+    mov ebx D@String
+
+    xor esi esi ; HiQword
+    xor ecx ecx ; LowQWord
+
+    While B$ebx <> 0
+        call alldecmul ecx, esi
+        mov ecx eax
+        mov esi edx
+
+        movsx eax B$ebx
+        sub eax '0' | jc L7>
+        cmp eax 9 | ja L7>
+        cdq
+        add ecx eax
+        adc esi edx
+
+        inc ebx
+        cmp B$ebx LowSigns | jbe L6>
+
+    End_While
+
+L6:
+    mov eax ecx
+    mov edx esi
+
+    mov esi ebx ; to avoid error anywhere else
+
+    jmp L8>
+L7:
+   mov ecx D$DezimalTypePtr
+   mov esi ebx
+   jmp BadNumberFormat
+
+L8:
+
+EndP
+
+;;
+Multiply a Qword unsigned integer by 10
+
+;;
+
+Proc alldecmul:
+    Arguments @ValA_Low, @ValA_Hi
+    uses esi, ebx
+
+    mov eax D@ValA_Hi
+    mov ecx 10
+    mov ebx D@ValA_Low
+
+    cmp eax 0 | jne @Notzero
+    mov eax ebx
+    mul ecx
+    ExitP
+
+@Notzero:
+
+    mul ecx
+
+    mov esi eax
+    mov eax ebx ; ValA_Low
+
+    mul ecx
+    add edx esi
+
+EndP
+
+BadClickFormat:
+    dec esi
+L0: lodsb | On al = 'X', lodsb
+
+    ..If al = 'H'
+        cmp B$esi LowSigns | ja L7>
+    ..Else_If al = 'D'
+        cmp B$esi LowSigns | ja L7>
+    ..Else_If al = 'B'
+        cmp B$esi LowSigns | ja L7>
+    ..Else
+      ; Try to read a Type Marker at the end, and re-run if possible:
+L7:     While B$esi > LowSigns | inc esi | End_While | dec esi | lodsb
+        .If al = 'H'
+            If ecx = HexType
+                mov eax 0 | ret
+            End_If
+        .Else_If al = 'D'
+            If ecx = DezimalType
+                mov eax 0 | ret
+            End_If
+        .Else_If al = 'B'
+            If ecx = BinType
+                mov eax 0 | ret
+            End_If
+        .Else
+            mov eax 0 | ret
+        .End_If
+    ..End_If
+
+    dec esi
+;;
+ esi now points to the last Char of the Number. We overwrite it: We kill the Types Markers
+ and we fill at the other end (start), with zeros:
+;;
+    push edi
+        mov edi esi | dec esi | On B$esi = 'X', dec esi
+        std
+            While B$esi > LowSigns | movsb | End_While
+        cld
+        While B$edi > LowSigns | mov B$edi '0' | dec edi | End_While
+    pop edi
+
+    inc esi | While B$esi = '0' | inc esi | End_While
+
+    If al = 'H'
+        jmp NackedClickHexa
+    Else_If al = 'D'
+        jmp ClickDecimal
+    Else  ; al = 'B'
+        jmp NackedClickBinary
+    End_If
+____________________________________________________________________________________________
+
+[IDD_NUMBERBASE 32510]
+[IDC_BASEDECIMAL 10]
+[IDC_BASEHEXADECIMAL 11]
+[IDC_BASEBINARY 12]
+[IDC_BASEDECIMALSIGNED 13]
+[IDC_BASEFLOAT32 14]
+[IDC_BASEFLOAT64 15]
+[IDC_BASEFLOAT80 16]
+
+ViewClickedNumber:
+    call 'USER32.DialogBoxParamA' D$hinstance, IDD_NUMBERBASE, &NULL, DlgClickedNumber, &NULL
+ret
+
+
+Proc DlgClickedNumber:
+    Arguments @Adressee, @Message, @wParam, @lParam
+    pushad
+
+    ...If D@Message = &WM_COMMAND                  ; User action
+
+    ...Else_If D@Message = &WM_INITDIALOG
+
+       call 'USER32.LoadIconA' D$hInstance 1
+       call 'USER32.SendMessageA' D@adressee &WM_SETICON &ICON_BIG eax
+
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEDECIMAL
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEDECIMALSIGNED
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEHEXADECIMAL
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEBINARY
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEFLOAT32
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEFLOAT64
+       call BinFormDisplayValues D@adressee, ClickedNumberValue, IDC_BASEFLOAT80
+
+    ...Else_If D@Message = &WM_CLOSE
+
+        call 'user32.EndDialog' D@Adressee &NULL
+
+    ...Else
+        popad | mov eax &FALSE |  ExitP
+
+    ...End_If
+
+L9: popad | mov eax &TRUE
+EndP
+
+
+[Size_Of_TextBuffer 256]
+[BinFormTextBuffer: B$ 0 #256]
+; qWordToAscii TranslateAny
+
+; tested number: 123456789123456123456
+Proc BinFormDisplayValues:
+    Arguments @Adressee, @value, @ControlID
+    uses edx, esi, edi
+
+    mov edi BinFormTextBuffer;DecimalBuffer
+    mov esi D@value
+
+    ..If D@ControlID = IDC_BASEDECIMAL
+
+        If D$esi+8 <> 0 ; Is it a TeraByte ?
+            call Dword80toAscii esi, edi, Size_Of_TextBuffer, &FALSE
+            ;call PrintRadixUnsigned esi, Size_Of_TextBuffer, edi, &FALSE
+            ;call HextoBinaryString esi, 80, edi, Size_Of_TextBuffer
+        Else_If D$esi+4 <> 0 ; only for qwords
+            call Dword64toAscii esi, edi, Size_Of_TextBuffer, &FALSE
+        Else
+            call Dword32toAscii esi, edi, Size_Of_TextBuffer, &FALSE
+        End_If
+
+        mov edi eax
+
+    ..Else_If D@ControlID = IDC_BASEDECIMALSIGNED
+
+        If D$esi+8 <> 0
+            call Dword80toAscii esi, edi, Size_Of_TextBuffer, &TRUE
+        Else_If D$esi+4 <> 0
+            call Dword64toAscii esi, edi, Size_Of_TextBuffer, &TRUE
+        Else
+            call Dword32toAscii esi, edi, Size_Of_TextBuffer, &TRUE
+        End_If
+
+        If eax = 0
+            ;mov edi BinFormTextBuffer
+            push edi | push esi | zcopy {"This number is not signed", 0} | pop esi | pop edi
+        Else
+            mov edi eax
+        End_If
+
+    ..Else_If D@ControlID = IDC_BASEHEXADECIMAL
+
+        mov eax esi
+
+        mov ecx edi ; just to restore later
+
+        If D$eax+8 <> 0
+            mov eax D$eax+8
+            call WriteEax
+            mov eax esi ; restore eax
+            mov W$edi '__' | inc edi | inc edi
+        End_If
+
+        If D$eax+4 <> 0
+            mov eax D$eax+4
+            call WriteEax
+            mov eax esi ; restore eax
+            mov W$edi '__' | inc edi | inc edi
+        End_If
+
+        mov eax D$eax
+        call WriteEax
+;;
+        If_And D$eax+4 <> 0, D$eax = 0 ; example: 18446743631327920128 (0FFFFFF99__00000000)
+            mov D$edi '0000' | mov D$edi+4 '0000'
+            add edi 8
+        Else
+            mov eax D$eax
+            call WriteEax
+        End_If
+;;
+        mov B$edi 0
+        mov edi ecx ; restore edi pointer
+
+    ..Else_If D@ControlID = IDC_BASEBINARY
+
+        call HextoBinaryString esi, 80, edi, Size_Of_TextBuffer
+
+    ..Else_If D@ControlID = IDC_BASEFLOAT32
+        ;finit
+
+        ;fild F$esi
+        ;call ST0ToAscii edi, 32
+
+        mov ecx 4 | call toFloat
+
+    ..Else_If D@ControlID = IDC_BASEFLOAT64
+        mov ecx 8 | call toDouble
+        ;finit
+        ;fild R$esi
+        ;call ST0ToAscii edi, 32
+
+    ..Else_If D@ControlID = IDC_BASEFLOAT80
+        mov ecx 10 | call toExtended
+        ;finit
+        ;fld T$esi
+        ;call ST0ToAscii edi, 32
+    ..End_If
+
+    call 'USER32.SendDlgItemMessageA' D@Adressee D@ControlID &WM_SETTEXT 0 edi
+    call 'USER32.SendDlgItemMessageA' D@Adressee D@ControlID &WM_GETTEXT 0 edi
+
+EndP
+
+
+Proc PrintRadixUnsigned:
+    Arguments @InputedValue, @BufferLen, @TextBuffer, @IsSigned
+
+    mov edi D@TextBuffer
+    add edi D@BufferLen
+    mov eax D@InputedValue
+    mov ecx D$eax
+    mov ebx D$eax+4
+
+    If D@IsSigned = &TRUE
+    ;test ebx ebx | jns L1>
+        ;mov D@Signed 1
+        neg ebx
+        neg ecx
+        sbb ebx 0
+    End_If
+
+    mov esi 10
+
+ ; If the high dword of the number is larger than the divisor, we
+ ; have to do a 'long division' to prevent overflow.
+
+    cmp ebx esi | jb @smallDiv
+
+@longDiv:
+
+    .Do
+
+        ; Note that this is a 'long division' algorithm. It can easily be expanded to
+        ; be able to divide any number by 32 bits. I only use it for 64 bits here to
+        ; keep the CPU from getting an exception on overflow when the input is larger
+        ; than ((2^32)-1)*divisor, so that printing any 64 bit number with any radix
+        ; is possible.
+
+        ; Divide high dword by divisor.
+        mov eax ebx
+        xor edx edx
+        div esi
+
+        ; Put remainder as high dword of the original dividend.
+        mov ebx eax
+        mov eax ecx
+        div esi
+
+        ; Convert the remainder to an ASCII char.
+        add dl '0'
+        dec edi | mov B$edi dl
+
+        mov ecx eax
+
+        If eax = 0
+            If ebx = 0
+                jmp @longDiv
+            End_If
+        End_If
+
+    .Loop_Until ebx < esi
+
+@smallDiv:
+
+    ; Set EBX::ECX to EDX::EAX for a normal 64->32 division.
+    mov edx ebx
+    mov eax ecx
+
+    Do
+        div esi
+        ; Convert the remainder to an ASCII char.
+        add dl '0'
+        dec edi | mov B$edi dl
+
+        ; Clean out high dword for next division.
+        xor edx edx
+    Loop_Until eax = 0
+
+
+    If D@IsSigned = &TRUE
+        dec edi | dec edi
+        mov W$edi '0-'
+        ;dec edi
+    End_If
+EndP
+
+
+Proc PrintRadixSigned:
+    Arguments @InputedValue, @BufferLen, @TextBuffer
+    ;test ebx ebx | jns A0<  ; PrintRadixUnsigned
+
+    mov B$edi '-'
+    inc edi
+    neg ebx
+    neg ecx
+    sbb ebx 0
+    call PrintRadixUnsigned
+    inc eax
+
+EndP
+
+
+
+
+
+
+Proc HextoBinary2:
+    Arguments @InputedValue, @BinBuffType, @BufferLen, @TextBuffer
+    Uses edx
+
+    mov edi D@TextBuffer
+    mov esi D@InputedValue
+
+    mov ecx D@BinBuffType
+    add edi D@BufferLen
+
+
+L0:     mov dl 1
+        lodsb
+
+L1:     mov ah '0'
+        test al dl | jz L2>
+        inc ah
+L2:     dec edi | mov B$edi ah
+        cmp dl 8 | jne L3> | dec edi | mov B$edi '_' | L3: ; did we reached 4 bytes at edi ? Ex.: 0000 0000
+                                                           ; it is 8 to avoid we change the carry flag
+        shl dl 1
+        jnc L1<
+
+        dec edi | dec edi | mov W$edi '__'
+        dec ecx | js L3> | jne L0< | L3:
+        ;loop L0<
+        mov W$edi 0
+        inc edi
+        inc edi
+
+EndP
+
+[ClickedNumberText: ClickedHexa: "
+
+                                    
+
+                                                               
+
+                                                        
+
+
+
+", 0
+
+ClickedNumberTitle: 'Bases forms', 0]
+
+
+ViewClickedNumber2:
+    mov eax D$ClickedNumberValue | lea edi D$ClickedHexa+8
+
+  ; Write Hexa form:
+    call WriteEax
+    mov al ' '
+    While B$edi <> CR
+        stosb
+    End_While
+    add edi 8
+
+  ; Write Decimal form:
+    mov eax D$ClickedNumberValue
+    mov dl 0FF | push edx                       ; Push stack end mark
+    mov ecx 10
+L0: mov edx 0
+    div ecx | push edx | cmp eax 0 | ja L0<     ; Push remainders
+L2: pop eax                                     ; Retrieve Backward
+    cmp al 0FF | je L9>                         ; Over?
+       add al '0' | stosb | jmp L2<             ; Write
+L9:
+    mov al ' '
+    While B$edi <> CR
+        stosb
+    End_While
+    add edi 8
+
+  ; Write Binary form:
+    mov D$edi '00_ ' | add edi 3
+    mov ebx D$ClickedNumberValue, ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+
+    mov al '_' | stosb | stosb
+
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+    mov al '_' | stosb | mov ecx 4
+L0: shl ebx 1 | mov al '0' | adc al 0 | stosb | loop L0<
+
+    call 'USER32.MessageBoxA' D$hwnd, ClickedNumberText, ClickedNumberTitle, &MB_SYSTEMMODAL
+ret
+____________________________________________________________________________________________
+____________________________________________________________________________________________
+
+; Little feature for "Replace all" in Selected Block: Whole words / Case insensitive
+
+; Tag Dialog 1050
+
+BlockReplaceAll:
+    call 'USER32.DialogBoxParamA' D$hinstance, 1050, D$hwnd, BlockReplaceAllProc, &NULL
+ret
+
+
+[BlockFrCase: &TRUE    BlockWwSearch: &TRUE]
+
+; Tag Dialog 1050
+
+Proc BlockReplaceAllProc:
+    Arguments @Adressee, @Message, @wParam, @lParam
+    Local @StartOfBlock, @EndOfBlock
+
+    pushad
+
+    ...If D@Message = &WM_INITDIALOG
+       ; call 'USER32.SendDlgItemMessageA' D@Adressee, 50, &BM_SETCHECK, D$BlockFrCase, 0
+       ; call 'USER32.SendDlgItemMessageA' D@Adressee, 51, &BM_SETCHECK, D$BlockWwSearch, 0
+        call 'USER32.GetDlgItem' D@Adressee, 10
+        call 'USER32.SetFocus' eax
+        popad | mov eax &TRUE | ExitP
+
+    ...Else_If D@Message = &WM_COMMAND
+
+        mov eax D@wParam | and D@wParam 0FFFF | shr eax 16
+
+        ..If D@wParam = &IDCANCEL
+            call 'USER32.EndDialog' D@Adressee, 0
+
+        ..Else_If D@wParam = &IDOK
+            call 'USER32.SendDlgItemMessageA' D@Adressee, 50, &BM_GETCHECK, 0, 0
+            mov D$BlockFrCase eax
+
+            call 'USER32.SendDlgItemMessageA' D@Adressee, 51, &BM_GETCHECK, 0, 0
+            mov D$BlockWwSearch eax
+
+            call 'USER32.SendDlgItemMessageA' D@Adressee, 10, &WM_GETTEXT, 80,
+                                              SearchString
+            call 'USER32.SendDlgItemMessageA' D@Adressee, 11, &WM_GETTEXT, 80,
+                                              ReplaceWithString
+            mov esi SearchString, ecx 0
+            While B$esi > 0 | inc esi | inc ecx | End_While
+            mov esi ReplaceWithString, D$LenOfReplaceString 0
+            While B$esi > 0 | inc esi | inc D$LenOfReplaceString | End_While
+
+            .If ecx > 0
+                push D$UpperLine, D$CaretRow, D$CaretLine
+                push D$DownSearch, D$CaseSearch, D$WholeWordSearch
+                    mov B$BlockInside &FALSE
+
+                    mov D$LenOfSearchedString ecx
+                  ; No 'String not found" Message at the end:
+                    mov B$OnReplaceAll &TRUE
+                    move D$NextSearchPos D$BlockStartTextPtr
+                    move D$CaseSearch D$BlockFrCase, D$WholeWordSearch D$BlockWwSearch
+                    mov B$DownSearch &TRUE
+                    move D@StartOfBlock D$BlockStartTextPtr, D@EndOfBlock D$BlockEndTextPtr
+
+L0:                 call StringSearch
+
+                    If B$BlockInside = &TRUE
+                        mov eax D@EndOfBlock | cmp D$BlockStartTextPtr eax | ja L1>
+                        call StringReplace | jmp L0<
+                    End_If
+
+L1:                 mov B$OnReplaceAll &FALSE, B$Disassembling &FALSE, B$BlockInside &TRUE
+                    move D$BlockStartTextPtr D@StartOfBlock, D$BlockEndTextPtr D@EndOfBlock
+                pop D$WholeWordSearch, D$CaseSearch, D$DownSearch
+                pop D$CaretLine, D$CaretRow, D$UpperLine
+                call AskForRedraw
+            .End_If
+
+            call 'USER32.EndDialog' D@Adressee, 0
+        ..End_If
+
+    ...Else
+L8:     popad | mov eax &FALSE | ExitP
+
+    ...End_If
+
+    popad | mov eax &TRUE
+EndP
+
+
+____________________________________________________________________________________________
+____________________________________________________________________________________________
+
+
+; If user DoubleClick or RightClick on Block, we check if the pointed thing is a Macro
+; evocation (to append an 'Unfold' Item in the Floating Menu). Called from
+; 'RightClickOnBlock'.
+
+IsItaMacro:
+    mov esi D$BlockStartTextPtr
+
+  ; Verify we are not pointing a Declaration:
+    push esi
+        While B$esi-1 = ' '
+            dec esi
+        End_While
+        mov al B$esi-1
+    pop esi
+    If al = '['
+        mov eax 0 | ret
+    End_If
+
+    mov edi D$CodeSource, al '[', ecx D$SourceLen
+    mov edx D$BlockEndTextPtr | sub edx D$BlockStartTextPtr | inc edx
+
+  ; Search for '[' in user Source:
+L0: repne scasb | jne L8>
+        push eax, ecx, esi, edi
+            While B$edi = ' '
+                inc edi                     ; Strip possible leading Space(s).
+            End_While
+            mov ecx edx
+L1:         mov al B$esi, bl B$edi | inc esi | inc edi | dec ecx
+            or al 020 | or bl 020 | cmp al bl | jne L2>          ; No case compare with Block.
+            cmp ecx 0 | ja L1<
+               jmp L9>
+L2:     pop edi, esi, ecx, eax
+
+L3: cmp ecx 0 | ja L0<
+
+L8: mov eax 0 | ret                         ; No mach found.
+
+  ; Mach found, but is it a Macro?
+L9: While B$edi = ' '
+        inc edi                             ; strip trailing Space(s)
+    End_While
+    cmp B$edi CR | je L9>                   ; Macro.
+    cmp B$edi '|' | je L9>                  ; Macro too.
+    cmp B$edi ';' | je L9>                  ; Macro too with comment after symbol.
+        pop edi, esi, ecx, eax | jmp L3<         ; Equate, Data or Macro with the same begining
+
+L9: pop edi, esi, ecx, eax
+
+    move D$InstructionToUnfold D$BlockStartTextPtr
+    dec edi | mov eax edi, D$UnfoldedMacro eax
+ret
+
+
+; Checks if we are pointing on an Equal PreParser line.
+
+
+[ASCII_DOLLAR 024, ASCII_PARAGRAPH 0A7]
+
+IsItAnEqual:
+    mov esi D$BlockStartTextPtr, eax 0, B$UnfoldEqual &FALSE
+    If B$esi-1 = ASCII_DOLLAR
+        sub esi 2
+    Else_If B$esi-1 = ASCII_PARAGRAPH
+        sub esi 2
+    End_If
+
+    mov D$InstructionToUnfold esi
+
+  ; Go to the start of the Statement:
+L0: dec esi
+    If B$esi = '|'
+        jmp L1>
+    Else_If B$esi = LF
+        jmp L1>
+    Else_If B$esi = ' '
+        je L0<
+    Else
+        ret
+    End_If
+
+  ; OK, the Selection is the first Member of a Statement. Go to next Component:
+L1: mov esi D$BlockEndTextPtr
+L0: inc esi
+    If B$esi = ' '
+        jmp L1>
+    Else_If B$esi = LF
+        ret
+    Else_If B$esi = ','
+        ret
+    End_If
+    jmp L0<
+
+L1: While B$esi = ' ' | inc esi | End_While
+
+    .If B$esi = '='
+        If B$esi+1 = ' '
+            mov B$UnfoldEqual &TRUE
+            move D$UnfoldedMacro D$CodeSource
+            dec D$UnfoldedMacro
+            mov eax &TRUE | ret
+        End_If
+    .End_If
+ret
+____________________________________________________________________________________________
+
+; Called by User DoubleLefClick. If the Block is a Label, the user can store it as
+; BookMarked.
+
+[BookMarks: ?    BookMarkLen: ?    BookMarkPtr: ?]
+[ToBeBookMarked: ? #20]
+
+IsItaLabel:
+  ; If not a Label, we abort:
+    mov esi D$BlockEndTextPtr
+    If B$esi+1 <> ':'
+        mov eax 0 | ret
+    End_If
+
+  ; Local Label, we abort:
+    mov esi D$BlockStartTextPtr
+    If B$esi+2 = ':'
+        mov eax 0 | ret
+    End_If
+
+  ; If It is a Local Symbol, we extend. If it is a Local Label we abort:
+    mov esi D$BlockStartTextPtr, edi ToBeBookMarked
+
+    If B$esi-1 = '@'
+        push edi | call SearchUpperMainLabel | pop edi | On eax = 0, ret
+        mov esi eax
+        While B$esi <> ':'
+            movsb
+        End_While
+        mov B$edi '@' | inc edi
+        mov esi D$BlockStartTextPtr
+    End_If
+
+    While esi < D$BlockEndTextPtr | movsb | End_While | movsb | mov B$edi 0
+
+    sub edi ToBeBookMarked | mov D$BookMarkLen edi
+    mov esi ToBeBookMarked
+
+  ; If the Block is aready BookMarked, we enable the [UnBookMark] option:
+    If D$BookMarks > 0
+        mov edi D$BookMarks, ecx D$BookMarkLen
+        inc edi
+L0:     push esi, edi, ecx
+            mov D$BookMarkPtr edi
+L1:         mov al B$esi, bl B$edi | or al 020 | or bl 020 | inc esi | inc edi
+            cmp al bl | jne L2>
+            loop L1<
+        pop ecx, eax, esi                       ; Found.
+        cmp B$edi ' ' | ja L3>
+        mov eax 2 | ret                         ; Return for [UnBookMark] option.
+L2:     pop ecx, eax, esi                       ; Not yet found.
+L3:     mov edi eax
+L3:     cmp B$edi 0 | je L4>
+            inc edi | jmp L3<
+L4:     inc edi | cmp B$edi 0 | jne L0<         ; Not yet end of Stored BookMarks.
+    End_If
+
+  ; If here, the Label is a Main label and is not yet BookMarked:
+    mov eax 1
+ret
+
+____________________________________________________________________________________________
+____________________________________________________________________________________________
+
+SearchUpperMainLabel:
+    mov edi D$BlockStartTextPtr
+L0: dec edi
+    While B$edi <> ':'
+        dec edi
+        If B$edi = '"'
+            Do
+                dec edi | on edi = D$CodeSource, jmp L7>
+            Loop_Until B$edi = '"'
+            dec edi
+        Else_If B$edi = "'"
+            Do
+                dec edi | on edi = D$CodeSource, jmp L7>
+            Loop_Until B$edi = "'"
+            dec edi
+        End_If
+        on edi = D$CodeSource, jmp L7>
+    End_While
+    While B$edi > ' '
+        dec edi | on edi = D$CodeSource, jmp L7>
+    End_While
+    inc edi
+    If B$edi = '@'
+        jmp L0<<
+    Else_If B$edi+2 = ':'
+        jmp L0<<
+    Else
+        mov eax edi | ret
+    End_If
+
+L7: mov eax 0
+ret
+
+
+[FullBookMarks: 'No more room to store BookMarks', 0
+ BookMarksTitle: '               ----------- BookMarks -----------', 0
+ EndBookMarks:   '                 ------------- Tree --------------', 0]
+[NumberOfBookMarks: 0]
+
+StoreBookMark:
+    call CreateTreeViewList
+    If D$BookMarks = 0
+        VirtualAlloc BookMarks 01000 | mov D$NumberOfBookMarks 2
+        call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle, 100, &LB_INSERTSTRING, 0,
+                                          EndBookMarks
+        call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle, 100, &LB_INSERTSTRING, 0,
+                                          BookMarksTitle
+    End_If
+    mov edi D$BookMarks, al 0, ecx 01000
+L0: repne scasb | cmp B$edi 0 | jne L0<
+    push edi
+        mov eax ToBeBookMarked
+        While B$eax <> 0 | inc eax | End_While
+        sub eax ToBeBookMarked
+        If ecx <= eax
+            call 'USER32.MessageBoxA' D$hwnd, FullBookMarks, Argh, &MB_SYSTEMMODAL
+            pop edi | jmp L9>
+        End_If
+        mov ecx eax, esi ToBeBookMarked
+        rep movsb
+        mov al ' ' | stosb | mov al 0 | stosb
+    pop edi
+
+    call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_INSERTSTRING 1 edi
+    inc D$NumberOfBookMarks
+L9: ret
+
+
+ReInsertBookMarks:
+    mov D$NumberOfBookMarks 2
+    call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_INSERTSTRING 0,
+                                     EndBookMarks
+    call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_INSERTSTRING 0,
+                                     BookMarksTitle
+
+    mov esi D$BookMarks | inc esi
+    .While B$esi > 0
+        call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_INSERTSTRING 1 esi
+        inc D$NumberOfBookMarks
+        While B$esi <> 0
+            inc esi
+        End_While
+        inc esi
+    .End_While
+ret
+
+
+DeleteBookMark:
+    call CreateTreeViewList
+    call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_FINDSTRING 0-1 D$BookMarkPtr
+    call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_DELETESTRING eax 0
+    mov edi D$BookMarkPtr, esi edi
+    add esi D$BookMarkLen | While B$esi > 0 | inc esi | End_While | inc esi
+    mov ecx D$BookMarks | add ecx 01000 | sub ecx esi | rep movsb
+
+  ; Delete the 2 added titles if no more BookMarks, delete the .BKM File and release Mem:
+    dec D$NumberOfBookMarks
+    If D$NumberOfBookMarks = 2
+        call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_DELETESTRING 0 0
+        call 'USER32.SendDlgItemMessageA' D$ShowTreeHandle 100  &LB_DELETESTRING 0 0
+        call DeleteBookMarkFile
+
+        VirtualFree D$BookMarks
+    End_If
+ret
+
+
+DeleteBookMarkFile:
+    mov D$NumberOfBookMarks 0
+    mov edi SaveFilter, al 0, ecx 0-1 | repne scasb
+    While B$edi <> '.'
+        dec edi
+    End_While
+
+    push D$edi, edi
+        mov D$edi '.BKM'
+
+        call 'KERNEL32.FindFirstFileA' SaveFilter FindFile
+
+        .If eax <> &INVALID_HANDLE_VALUE
+            call 'KERNEL32.FindClose' eax
+            call 'KERNEL32.DeleteFileA' SaveFilter
+        .End_If
+    pop edi, D$edi
+ret
+
+
+____________________________________________________________________________________________
+____________________________________________________________________________________________
+
+EncodeBoxError:
+    call ErrorMessageBox 0, D$ErrorMessagePtr
+    ;mov esp D$OldStackPointer | sub esp 4
+    Ros_RestoreStack ; | sub esp 4 ??? bug on esp 4 see EncodeError  movss edi XMM0
+ret
+____________________________________________________________________________________________
+
+MarginRightClick:
+    On D$BreakPointsTables = 0, call InitBreakPointsTables
+
+    call MouseTextPos
+    push ebx
+        call SearchTxtPtr | mov D$BreakPointLocation eax
+    pop ebx
+
+    mov D$PhysicalCaretRow eax, D$CaretRow eax, D$StartBlockCol eax, D$EndBlockCol eax,
+        D$CaretLine ebx, D$StartBlockLine ebx, D$EndBlockLine ebx
+
+    mov D$CaretRow 1
+
+    mov eax D$BreakPointLocation | call IsEaxInBpOnTable
+
+    call BpMenu
+ret
+____________________________________________________________________________________________
+
+DoubleClick:
+    call MouseTextPos
+
+    mov D$PhysicalCaretRow eax, D$CaretRow eax, D$StartBlockCol eax, D$EndBlockCol eax,
+        D$CaretLine ebx, D$StartBlockLine ebx, D$EndBlockLine ebx
+
+    If D$DBPMenuOn = DOUBLE_CLICK_ACTION
+        On B$ClickOnMargin = &TRUE, jmp DoubleClickMarginAction
+    End_If
+
+    call SearchTxtPtr
+
+    mov al B$esi | call WordEdge | On B$Edge = &TRUE, ret
+
+    push esi
+        std
+L0:       lodsb | call WordEdge | cmp B$Edge &TRUE | jne L0<         ; search start
+        cld
+        add esi 2 | mov D$BlockStartTextPtr esi
+    pop esi
+
+L0: lodsb | call WordEdge | cmp B$Edge &TRUE | jne L0<               ; search end
+
+    sub esi 2 | mov D$BlockEndTextPtr esi
+
+    mov B$BlockInside &TRUE | call SetCaret esi
+    call AskForRedraw | call RightClickOnBlock
+ret
+____________________________________________________________________________________________
+
+
+_________________________________________________________
+
+; See comment for rotary BackTable at "SetBackTableMemory"
+
+ClearBackTable:
+    mov edi D$BackTable, D$BackTablePtr edi, eax 0, ecx 040 | rep stosd
+ret
+
+
+StorePosInBackTable:
+    mov ebx D$BackTablePtr, eax D$UpperLine
+    mov D$ebx eax | add bl 4 | mov D$ebx 0
+    mov D$BackTablePtr ebx, B$MovingBack  &FALSE
+ret
+
+
+[MovingBack: ?]
+
+BackClick:
+    mov eax D$CodeSource | On D$SourceEnd = eax, ret
+
+    If B$MovingBack = &FALSE              ; BackTable store old pos, not last new one.
+      call StorePosInBackTable            ; here we add last new one to allow Forward
+      sub bl 4                            ; moves completion.
+      mov D$BackTablePtr ebx, B$MovingBack &TRUE
+    End_If
+
+    mov ebx D$BackTablePtr | sub bl 4
+    If D$ebx = 0                          ; If Start pointer, lock on it
+        call StartEdition | call AskForRedraw | ret
+    End_If
+
+L1: mov eax D$ebx
+    mov D$BackTablePtr ebx, D$UpperLine eax
+    mov D$CaretRow 1, D$CaretLine 0, D$CurrentWritingPos eax
+    call TryToMove
+    call ResetUpperline
+    call AskForRedraw
+L9: ret
+
+
+ForwardClick:
+    mov eax D$CodeSource | On D$SourceEnd = eax, ret
+
+    mov ebx D$BackTablePtr | add bl 4
+    mov eax D$ebx | cmp eax 0 | je L9>
+      mov D$BackTablePtr ebx, D$UpperLine eax
+      mov D$CaretRow 1, D$CaretLine 0, D$CurrentWritingPos eax
+      call TryToMove | call ResetUpperline | call AskForRedraw
+L9: ret
+
+
+; If text lenght have change between two right-click moves, D$Upperline may point to
+; any char in a line. We ensure start of line in D$Upperline:
+
+ResetUpperline:
+    mov esi D$Upperline
+L0: cmp B$esi-1 LF | je L9>
+        dec esi | jmp L0<
+L9: mov D$Upperline esi
+ret
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
